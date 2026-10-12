@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isWhitelistedEmail(email) {
+      return email is string && email.lower() in [
+        'modelatech2026@gmail.com',
+        'sushoovandas@gmail.com',
+        'aditichakraborty2005@gmail.com'
+      ];
+    }
+
+    function isSuperAdmin() {
+      return (
+        isSignedIn() && (
+          (request.auth.token.email != null && isWhitelistedEmail(request.auth.token.email)) ||
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        )
+      );
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.size() >= 3 && email.size() <= 150 && email.matches('^[^@]+@[^@]+\\.[^@]+$');
+    }
+
+    function isValidAccessRequest(data) {
+      return data is map &&
+        (data.get('applicant_email', '') != '' || data.get('email', '') != '') &&
+        (data.get('applicant_email', '') == '' || isValidEmail(data.get('applicant_email', ''))) &&
+        (data.get('email', '') == '' || isValidEmail(data.get('email', ''))) &&
+        (data.get('status', '') is string && data.get('status', '').size() <= 32);
+    }
+
+    // Connection testing
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    // Access Requests Collection
+    match /access_requests/{requestId} {
+      // Allow read so applicants can check request status
+      allow read: if true;
+
+      // Submit access request:
+      // Whitelisted Super Admins are automatically permitted with approved status.
+      // Non-admins CANNOT self-approve (status must be 'pending' and role != 'SUPER_ADMIN').
+      allow create: if isValidAccessRequest(request.resource.data) && (
+        isSuperAdmin() ||
+        isWhitelistedEmail(request.resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(request.resource.data.get('email', '')) ||
+        (request.resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('role', '') != 'SUPER_ADMIN')
+      );
+
+      // Updates and Deletes:
+      // Allowed for Super Admins or for whitelisted Super Admin requests,
+      // or pending request updates that do not elevate privileges.
+      allow update: if isValidAccessRequest(request.resource.data) && (
+        isSuperAdmin() ||
+        isWhitelistedEmail(request.resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(request.resource.data.get('email', '')) ||
+        isWhitelistedEmail(resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(resource.data.get('email', '')) ||
+        (resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('role', '') != 'SUPER_ADMIN')
+      );
+
+      allow delete: if isSuperAdmin();
+    }
+
+    // Legacy requests collection fallback
+    match /requests/{requestId} {
+      allow read: if true;
+      allow create: if isValidAccessRequest(request.resource.data) && (
+        isSuperAdmin() ||
+        isWhitelistedEmail(request.resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(request.resource.data.get('email', '')) ||
+        (request.resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('role', '') != 'SUPER_ADMIN')
+      );
+      allow update: if isValidAccessRequest(request.resource.data) && (
+        isSuperAdmin() ||
+        isWhitelistedEmail(request.resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(request.resource.data.get('email', '')) ||
+        isWhitelistedEmail(resource.data.get('applicant_email', '')) ||
+        isWhitelistedEmail(resource.data.get('email', '')) ||
+        (resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('status', '').lower() == 'pending' &&
+         request.resource.data.get('role', '') != 'SUPER_ADMIN')
+      );
+      allow delete: if isSuperAdmin();
+    }
+
+    // Registered user profile documents
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if isSuperAdmin() ||
+        (isSignedIn() && request.auth.uid == userId) ||
+        (request.resource.data.get('email', '') != '' && isWhitelistedEmail(request.resource.data.get('email', '')));
+    }
+
+    // Admins registry collection
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isSuperAdmin() || (
+        request.resource.data.get('email', '') != '' &&
+        isWhitelistedEmail(request.resource.data.get('email', ''))
+      );
+    }
+
+    // Default catch-all: strictly protect all other collections
+    match /{document=**} {
+      allow read, write: if isSignedIn() && isSuperAdmin();
+    }
+  }
+}
