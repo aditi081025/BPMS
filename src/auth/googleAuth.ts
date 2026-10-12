@@ -8,16 +8,18 @@ export const SUPER_ADMIN_EMAIL = 'modelatech2026@gmail.com';
 export const SUPER_ADMIN_NAME = 'Modela Tech';
 export const SECONDARY_ADMIN_EMAIL = 'sushoovandas@gmail.com';
 
-export const SUPER_ADMIN_EMAILS = [
+export const SUPER_ADMIN_WHITELIST = [
   'modelatech2026@gmail.com',
   'sushoovandas@gmail.com',
   'aditichakraborty2005@gmail.com',
 ];
 
+export const SUPER_ADMIN_EMAILS = SUPER_ADMIN_WHITELIST;
+
 export function isSuperAdminEmail(email?: string | null): boolean {
   if (!email) return false;
   const clean = email.trim().toLowerCase();
-  return SUPER_ADMIN_EMAILS.includes(clean);
+  return SUPER_ADMIN_WHITELIST.some((e) => e.trim().toLowerCase() === clean);
 }
 
 export interface GoogleProfilePayload {

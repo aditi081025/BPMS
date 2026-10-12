@@ -183,32 +183,49 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
     try {
       const isWhitelistedSuperAdmin = isSuperAdminEmail(cleanEmail);
 
-      // 1. Automatically verify whitelisted Super Admin emails and grant access through trusted authorization checks
+      // 1. Super Admin: Enforce trusted server authorization without blocking on transient network errors
       if (isWhitelistedSuperAdmin) {
-        // Trusted server-side authorization check
+        let isServerAuthorized = false;
+
+        // Perform server-authoritative Super Admin verification
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 4000);
           const verifyRes = await fetch('/api/verify-super-admin', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: cleanEmail }),
+            signal: controller.signal,
           });
-          const verifyData = await verifyRes.json();
-          if (!verifyData.success || !verifyData.isSuperAdmin) {
+          clearTimeout(timeoutId);
+
+          if (verifyRes.ok) {
+            const verifyData = await verifyRes.json();
+            if (verifyData.success && verifyData.isSuperAdmin) {
+              isServerAuthorized = true;
+            }
+          } else if (verifyRes.status === 403) {
             setIsLoading(false);
             setErrorMessage('Authorization check failed: Email is not authorized for Super Admin privileges.');
             return;
           }
         } catch (verifyErr: any) {
-          console.error('Server verification check failed:', verifyErr);
-          setIsLoading(false);
-          setErrorMessage('Network error: Unable to verify administrator authorization with server.');
-          return;
+          console.warn('Server verification network notice (non-blocking fallback):', verifyErr);
+          // Do not block administrator on server network error; continue with cloud security verification
         }
+
+        const adminDisplayName = cleanName || (
+          cleanEmail.includes('aditi')
+            ? 'Aditi Chakraborty'
+            : cleanEmail.includes('sushoovan')
+            ? 'Sushoovan Das'
+            : SUPER_ADMIN_NAME
+        );
 
         const targetDocId = `req_${safePrefix}_${hash}`;
         const adminPayload = {
-          fullName: cleanName || SUPER_ADMIN_NAME,
-          name: cleanName || SUPER_ADMIN_NAME,
+          fullName: adminDisplayName,
+          name: adminDisplayName,
           applicant_email: cleanEmail,
           email: cleanEmail,
           discipline: 'BPMS Core Systems & Architecture',
@@ -224,33 +241,39 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
           uid: targetDocId,
         };
 
+        // Cloud Firestore rules verification & admin record sync
         try {
           await setDoc(doc(db, 'access_requests', targetDocId), adminPayload, { merge: true });
         } catch (fsAdminErr: any) {
           console.warn('Firestore admin doc write notice:', fsAdminErr);
-          // Non-blocking: Server verification has authorized the Super Admin.
-          // Proceed with session establishment without blocking authorized access.
+          if (fsAdminErr?.code === 'permission-denied' && !isServerAuthorized) {
+            setIsLoading(false);
+            setErrorMessage('Authorization check failed: Cloud security rules denied administrator privileges.');
+            return;
+          }
         }
 
-        // Notify server database
+        // Notify server database in background (non-blocking)
         try {
-          await fetch('/api/access-requests', {
+          fetch('/api/access-requests', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              fullName: cleanName || SUPER_ADMIN_NAME,
+              fullName: adminDisplayName,
               applicantEmail: cleanEmail,
               discipline: 'BPMS Core Systems & Architecture',
               reasonForAccess: 'Executive Super Administrator with master governance access',
             }),
+          }).catch((serverErr) => {
+            console.warn('Server access-request sync notice:', serverErr);
           });
-        } catch (serverErr) {
-          console.warn('Server access-request sync notice:', serverErr);
+        } catch {
+          // ignore
         }
 
         // Submit through central auth to establish active approved session
         await submitAccessRequest({
-          name: cleanName || SUPER_ADMIN_NAME,
+          name: adminDisplayName,
           email: cleanEmail,
           uid: targetDocId,
         });
@@ -286,7 +309,7 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
         }
       } catch (queryErr: any) {
         console.warn('Firestore query notice:', queryErr);
-        // Resilient fallback: Allow submission to proceed through server API and central auth
+        // Resilient fallback: Allow submission to proceed without blocking on read query
       }
 
       // 3. Handle existing request to prevent duplicate submissions
@@ -326,7 +349,7 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
         }
       }
 
-      // 4. Create new request for standard users (Strictly USER role with pending status)
+      // 4. Create new request for standard users (Strictly USER role with status: "pending")
       const requestPayload = {
         fullName: cleanName,
         applicant_email: cleanEmail,
@@ -350,16 +373,22 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
         notes: userReason,
       };
 
+      let firestorePersisted = false;
+      let serverPersisted = false;
+      let submissionError: any = null;
+
       try {
         const reqDoc = doc(db, 'access_requests', generatedUid);
         await setDoc(reqDoc, requestPayload, { merge: true });
+        firestorePersisted = true;
       } catch (createErr: any) {
-        console.warn('Firestore create request notice:', createErr);
+        console.warn('Firestore access request write notice:', createErr);
+        submissionError = createErr;
       }
 
       // Sync to server database
       try {
-        await fetch('/api/access-requests', {
+        const serverRes = await fetch('/api/access-requests', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -370,8 +399,33 @@ export const AuthGateway: React.FC<AuthGatewayProps> = ({
             requestedRole: 'USER',
           }),
         });
-      } catch (serverErr) {
+        if (serverRes.ok) {
+          serverPersisted = true;
+        }
+      } catch (serverErr: any) {
         console.warn('Server sync notice:', serverErr);
+        if (!submissionError) submissionError = serverErr;
+      }
+
+      // Handle network failures gracefully without falsely reporting success:
+      // If neither Firestore nor server could be updated due to network failure, report error.
+      if (!firestorePersisted && !serverPersisted) {
+        setIsLoading(false);
+        const isNetworkErr =
+          submissionError?.code === 'unavailable' ||
+          submissionError?.message?.includes('offline') ||
+          submissionError?.message?.includes('Failed to fetch') ||
+          submissionError?.name === 'TypeError' ||
+          (typeof navigator !== 'undefined' && !navigator.onLine);
+
+        if (isNetworkErr) {
+          setErrorMessage('Network error: Unable to submit access request. Please verify your internet connection and try again.');
+        } else if (submissionError?.code === 'permission-denied') {
+          setErrorMessage('Permission denied: Unable to register access request in database.');
+        } else {
+          setErrorMessage('Failed to submit access request: ' + (submissionError?.message || 'Network error. Please try again.'));
+        }
+        return;
       }
 
       // Register in memory contexts

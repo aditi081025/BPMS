@@ -21,6 +21,12 @@ export const SUPER_ADMIN_WHITELIST = [
   'aditichakraborty2005@gmail.com',
 ];
 
+export function isSuperAdminEmailServer(email?: string | null): boolean {
+  if (!email) return false;
+  const clean = String(email).trim().toLowerCase();
+  return SUPER_ADMIN_WHITELIST.some((e) => e.trim().toLowerCase() === clean);
+}
+
 // ============================================================================
 // RESILIENT IN-MEMORY DATA STORES (Active when SQL is offline or not configured)
 // ============================================================================
@@ -405,7 +411,7 @@ dbRouter.get('/access-requests/check', async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, error: 'email query parameter is required' });
   }
   const cleanEmail = emailQuery.trim().toLowerCase();
-  const isSuperAdmin = SUPER_ADMIN_WHITELIST.includes(cleanEmail);
+  const isSuperAdmin = isSuperAdminEmailServer(cleanEmail);
 
   if (isSuperAdmin) {
     return res.json({
@@ -468,7 +474,7 @@ dbRouter.post('/verify-super-admin', async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, error: 'email is required' });
   }
   const cleanEmail = String(email).trim().toLowerCase();
-  const isSuperAdmin = SUPER_ADMIN_WHITELIST.includes(cleanEmail);
+  const isSuperAdmin = isSuperAdminEmailServer(cleanEmail);
 
   if (!isSuperAdmin) {
     return res.status(403).json({
@@ -507,7 +513,7 @@ dbRouter.post('/access-requests', async (req: Request, res: Response) => {
   const cleanEmail = String(applicantEmail).trim().toLowerCase();
   const cleanName = String(fullName).trim();
   const cleanReason = String(reasonForAccess || 'Sign-in Access Request for ProductionPulse BPMS').trim();
-  const isSuperAdmin = SUPER_ADMIN_WHITELIST.includes(cleanEmail);
+  const isSuperAdmin = isSuperAdminEmailServer(cleanEmail);
 
   // 1. Check for existing request to prevent duplicates
   let existingReq: any = null;
